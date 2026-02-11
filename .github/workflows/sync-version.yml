@@ -2,7 +2,7 @@ name: Sync Version and release
 
 on:
   repository_dispatch:
-    types: [sync-version]
+    types: [version_update]
 
 permissions:
   contents: write
@@ -19,6 +19,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          token: ${{ secrets.PAT }}
           fetch-depth: 0
 
       # -----------------------------
@@ -78,9 +79,9 @@ jobs:
         run: |
           git config user.name "srkdev404-cyber"
           git config user.email "srkdev404@gmail.com"
- 
-          git add public admin
-          git commit -m "chore: release WordPress plugin v${VERSION}" || echo "Nothing to commit"
+          git add composer.json
+
+          git commit -m "chore: sync version to v${VERSION}" || echo "Nothing to commit"
           git push origin "$BRANCH"
  
       # --------------------------------------------
@@ -89,22 +90,9 @@ jobs:
       - name: Create Pull Request
         env:
           GH_TOKEN: ${{ secrets.PAT }}
-          RELEASE_NOTES: ${{ github.event.client_payload.release_notes }}
         run: |
-          git fetch origin master
- 
-          if git diff --quiet origin/master..."$BRANCH"; then
-            echo "ℹ️ No commits between $BRANCH and master. Skipping PR creation."
-            exit 0
-          fi
- 
-          PR_BODY=$(printf \
-            "release: yes\n\n## Release Notes (from primary repo)\n\n%s\n" \
-            "$RELEASE_NOTES")
- 
           gh pr create \
             --base master \
-            --head "$BRANCH" \
+            --head release-v${VERSION} \
             --title "Release v${VERSION}" \
-            --body "$PR_BODY" \
-            || echo "Pull request already exists"
+            --body "release: yes"
