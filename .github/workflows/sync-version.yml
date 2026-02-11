@@ -1,4 +1,4 @@
-name: Sync Version and Release
+name: Sync Version and release
 
 on:
   repository_dispatch:
@@ -6,67 +6,90 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
-  release:
+  sync_version:
     runs-on: ubuntu-latest
 
     steps:
-      # --------------------------------
-      # Checkout master
-      # --------------------------------
+      # -----------------------------
+      # Checkout repository
+      # -----------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # --------------------------------
-      # Read version from dispatch
-      # --------------------------------
+      # -----------------------------
+      # Read incoming version
+      # -----------------------------
       - name: Set VERSION
         run: |
           VERSION="${{ github.event.client_payload.version }}"
           if [ -z "$VERSION" ]; then
-            echo "Version missing"
+            echo "Version missing in dispatch"
             exit 1
           fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "Incoming version: $VERSION"
 
-      # --------------------------------
-      # Update composer.json version
-      # --------------------------------
+      # -----------------------------
+      # Read current version
+      # -----------------------------
+      - name: Read current version
+        run: |
+          CURRENT=$(jq -r '.version' composer.json)
+          echo "CURRENT_VERSION=$CURRENT" >> $GITHUB_ENV
+          echo "Local version: $CURRENT"
+
+      # -----------------------------
+      # Skip if same version
+      # -----------------------------
+      - name: Skip if version matches
+        run: |
+          if [ "$VERSION" = "$CURRENT_VERSION" ]; then
+            echo "✔ Version already up to date."
+            exit 0
+          fi
+
+      # -----------------------------
+      # Create release branch
+      # -----------------------------
+      - name: Create branch
+        run: |
+          BRANCH="release-v${VERSION}"
+          git checkout -b "$BRANCH"
+          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
+
+      # -----------------------------
+      # Update composer.json
+      # -----------------------------
       - name: Update composer.json
         run: |
           jq ".version = \"$VERSION\"" composer.json > tmp.json
           mv tmp.json composer.json
 
-      # --------------------------------
-      # Commit changes
-      # --------------------------------
-      - name: Commit changes
+      # -----------------------------
+      # Commit & Push
+      # -----------------------------
+      - name: Commit and Push
         run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions Bot"
+          git config user.email "ci-bot@github.com"
           git add composer.json
-          git commit -m "chore: bump version to v${VERSION}" || echo "No changes to commit"
-          git push origin master
+          git commit -m "chore: bump version to v${VERSION}"
+          git push origin "$BRANCH"
 
-      # --------------------------------
-      # Create Git Tag
-      # --------------------------------
-      - name: Create Git Tag
+      # -----------------------------
+      # Create Pull Request
+      # -----------------------------
+      - name: Create Pull Request
         run: |
-          git tag v${VERSION}
-          git push origin v${VERSION}
-
-      # --------------------------------
-      # Create GitHub Release
-      # --------------------------------
-      - name: Create GitHub Release
-        run: |
-          gh release create v${VERSION} \
+          gh pr create \
+            --base master \
+            --head "$BRANCH" \
             --title "Release v${VERSION}" \
-            --notes "Release version ${VERSION}"
+            --body "release: yes"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
