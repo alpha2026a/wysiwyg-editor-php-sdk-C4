@@ -70,26 +70,41 @@ jobs:
           jq ".version = \"$VERSION\"" composer.json > tmp.json
           mv tmp.json composer.json
 
-      # -----------------------------
-      # Commit & Push
-      # -----------------------------
-      - name: Commit and Push
-        run: |
-          git config user.name "GitHub Actions Bot"
-          git config user.email "ci-bot@github.com"
-          git add composer.json
-          git commit -m "chore: bump version to v${VERSION}"
-          git push origin "$BRANCH"
 
-      # -----------------------------
-      # Create Pull Request
-      # -----------------------------
-      - name: Create Pull Request
+      # --------------------------------------------
+      # Commit & push
+      # --------------------------------------------
+      - name: Commit & push
         run: |
+          git config user.name "srkdev404-cyber"
+          git config user.email "srkdev404@gmail.com"
+ 
+          git add public admin
+          git commit -m "chore: release WordPress plugin v${VERSION}" || echo "Nothing to commit"
+          git push origin "$BRANCH"
+ 
+      # --------------------------------------------
+      # Create Pull Request 
+      # --------------------------------------------
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+          RELEASE_NOTES: ${{ github.event.client_payload.release_notes }}
+        run: |
+          git fetch origin master
+ 
+          if git diff --quiet origin/master..."$BRANCH"; then
+            echo "ℹ️ No commits between $BRANCH and master. Skipping PR creation."
+            exit 0
+          fi
+ 
+          PR_BODY=$(printf \
+            "release: yes\n\n## Release Notes (from primary repo)\n\n%s\n" \
+            "$RELEASE_NOTES")
+ 
           gh pr create \
             --base master \
             --head "$BRANCH" \
             --title "Release v${VERSION}" \
-            --body "release: yes"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            --body "$PR_BODY" \
+            || echo "Pull request already exists"
