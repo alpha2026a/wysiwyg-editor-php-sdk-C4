@@ -1,1 +1,72 @@
 name: Sync Version and Release
+
+on:
+  repository_dispatch:
+    types: [sync-version]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      # --------------------------------
+      # Checkout master
+      # --------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # --------------------------------
+      # Read version from dispatch
+      # --------------------------------
+      - name: Set VERSION
+        run: |
+          VERSION="${{ github.event.client_payload.version }}"
+          if [ -z "$VERSION" ]; then
+            echo "Version missing"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Incoming version: $VERSION"
+
+      # --------------------------------
+      # Update composer.json version
+      # --------------------------------
+      - name: Update composer.json
+        run: |
+          jq ".version = \"$VERSION\"" composer.json > tmp.json
+          mv tmp.json composer.json
+
+      # --------------------------------
+      # Commit changes
+      # --------------------------------
+      - name: Commit changes
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add composer.json
+          git commit -m "chore: bump version to v${VERSION}" || echo "No changes to commit"
+          git push origin master
+
+      # --------------------------------
+      # Create Git Tag
+      # --------------------------------
+      - name: Create Git Tag
+        run: |
+          git tag v${VERSION}
+          git push origin v${VERSION}
+
+      # --------------------------------
+      # Create GitHub Release
+      # --------------------------------
+      - name: Create GitHub Release
+        run: |
+          gh release create v${VERSION} \
+            --title "Release v${VERSION}" \
+            --notes "Release version ${VERSION}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
