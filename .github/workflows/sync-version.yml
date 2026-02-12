@@ -19,28 +19,23 @@ jobs:
           token: ${{ secrets.PAT }}
           fetch-depth: 0
 
-      - name: Set VERSION
-        run: |
-          VERSION="${{ github.event.client_payload.version }}"
-          if [ -z "$VERSION" ]; then
-            echo "Version missing in dispatch"
-            exit 1
-          fi
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "Incoming version: $VERSION"
-
       - name: Read current version
         run: |
           CURRENT=$(jq -r '.version' composer.json)
           echo "CURRENT_VERSION=$CURRENT" >> $GITHUB_ENV
           echo "Local version: $CURRENT"
 
-      - name: Skip if version matches
+      - name: Increment patch version
         run: |
-          if [ "$VERSION" = "$CURRENT_VERSION" ]; then
-            echo "Version already up to date."
-            exit 0
-          fi
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+          PATCH=$((PATCH + 1))
+          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+
+          echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
+          echo "New version: $NEW_VERSION"
+
+          jq ".version = \"$NEW_VERSION\"" composer.json > tmp.json
+          mv tmp.json composer.json
 
       - name: Create release branch
         run: |
@@ -62,6 +57,9 @@ jobs:
           git add composer.json
           git commit -m "chore: sync version to v${VERSION}" || echo "Nothing to commit"
           git push origin "$BRANCH"
+
+      - name: Authenticate GH CLI
+        run: echo "${{ secrets.PAT }}" | gh auth login --with-token
 
       - name: Create Pull Request
         env:
