@@ -1,20 +1,46 @@
-name: Sync Version – PHP SDK
+name: Auto Release – WordPress
  
 on:
-  repository_dispatch:
-    types: [version_update]
+  pull_request:
+    types: [closed]
+    branches:
+      - master
  
 permissions:
   contents: write
-  pull-requests: write
  
 jobs:
-  sync:
+  release:
+    # Run only when PR is merged
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
  
     steps:
       # --------------------------------------------
-      # Checkout repository
+      # Validate release intent
+      # --------------------------------------------
+      - name: Validate release intent
+        id: intent
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const body = context.payload.pull_request.body || '';
+            const title = context.payload.pull_request.title || '';
+            const text = `${title}\n${body}`;
+ 
+            core.setOutput(
+              'release',
+              /release:\s*yes/i.test(text) ? 'true' : 'false'
+            );
+ 
+      - name: Stop if not a release PR
+        if: steps.intent.outputs.release == 'false'
+        run: |
+          echo "ℹ️ Not a release PR. Skipping auto-release."
+          exit 0
+ 
+      # --------------------------------------------
+      # Checkout merged code
       # --------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -23,107 +49,50 @@ jobs:
           fetch-depth: 0
  
       # --------------------------------------------
-      # Load & validate version (from primary repo)
+      # Read version from repo (SOURCE OF TRUTH)
+      # Adjust this if you store version elsewhere
       # --------------------------------------------
-      - name: Load & validate version
+      - name: Read version from assets
         run: |
-          VERSION="${{ github.event.client_payload.version }}"
-          VERSION="${VERSION//,/\.}"
+          # Example: extract version from any JS/CSS reference
+          VERSION=$(grep -RhoE '[0-9]+\.[0-9]+\.[0-9]+' public | head -n1)
  
           if [ -z "$VERSION" ]; then
-            echo "Version missing in dispatch payload"
+            echo "❌ Failed to determine version from repository"
             exit 1
           fi
  
           if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "Invalid version format: $VERSION"
+            echo "❌ Invalid version format: $VERSION"
             exit 1
           fi
  
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "Dispatching version $VERSION"
+          echo "✅ Releasing version $VERSION"
  
       # --------------------------------------------
-      # Compare current version vs incoming version
+      # Prepare clean release notes from PR body
       # --------------------------------------------
-      - name: Compare current version
+      - name: Prepare release notes
         run: |
-          CURRENT_VERSION=$(jq -r '.version' composer.json)
+          PR_BODY="${{ github.event.pull_request.body }}"
  
-          if [ -z "$CURRENT_VERSION" ] || [ "$CURRENT_VERSION" = "null" ]; then
-            echo "Unable to determine current version from composer.json"
-            exit 1
-          fi
+          CLEAN_NOTES=$(echo "$PR_BODY" | sed \
+            -e '/^release:\s*/Id' \
+            -e '/^## Release Notes.*$/Id')
  
-          echo "Current version : $CURRENT_VERSION"
-          echo "Incoming version: $VERSION"
- 
-          if [ "$CURRENT_VERSION" = "$VERSION" ]; then
-            echo "Versions are identical. Denying PR creation."
-            exit 0
-          fi
- 
-          echo "Version change detected. Proceeding."
+          echo "RELEASE_NOTES<<EOF" >> $GITHUB_ENV
+          echo "$CLEAN_NOTES" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
  
       # --------------------------------------------
-      # Prepare release branch
+      # Create GitHub Release (NO artifacts)
       # --------------------------------------------
-      - name: Prepare release branch
-        run: |
-          BRANCH="release-v${VERSION}"
-          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
- 
-          git fetch origin
- 
-          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
-            git checkout "$BRANCH"
-            git pull origin "$BRANCH"
-          else
-            git checkout -b "$BRANCH"
-          fi
- 
-      # --------------------------------------------
-      # Update composer.json version
-      # --------------------------------------------
-      - name: Update composer.json
-        run: |
-          jq ".version = \"$VERSION\"" composer.json > tmp.json
-          mv tmp.json composer.json
- 
-      # --------------------------------------------
-      # Commit & push
-      # --------------------------------------------
-      - name: Commit & push
-        run: |
-          git config user.name "froala-travis-bot"
-          git config user.email "froala_git_travis_bot@idera.com"
- 
-          git add composer.json
-          git commit -m "chore: release PHP SDK v${VERSION}" || echo "Nothing to commit"
-          git push origin "$BRANCH"
- 
-      # --------------------------------------------
-      # Create Pull Request 
-      # --------------------------------------------
-      - name: Create Pull Request
+      - name: Create GitHub Release
         env:
-          GH_TOKEN: ${{ secrets.PAT }}
-          RELEASE_NOTES: ${{ github.event.client_payload.release_notes }}
+          GITHUB_TOKEN: ${{ secrets.PAT }}
         run: |
-          git fetch origin master
- 
-          if git diff --quiet origin/master..."$BRANCH"; then
-            echo "No commits between $BRANCH and master. Skipping PR creation."
-            exit 0
-          fi
- 
-          PR_BODY=$(printf \
-            "release: yes\n\n## Release Notes (from primary repo)\n\n%s\n" \
-            "$RELEASE_NOTES")
- 
-          gh pr create \
-            --base master \
-            --head "$BRANCH" \
-            --title "Release v${VERSION}" \
-            --body "$PR_BODY" \
-            || echo "Pull request already exists"
+          gh release create "v${VERSION}" \
+            --title "Release ${VERSION}" \
+            --notes "$RELEASE_NOTES" \
+            --latest
