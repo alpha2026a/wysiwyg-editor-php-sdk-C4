@@ -1,25 +1,27 @@
-name: Sync Version and Release
-
+name: Sync Version – PHP SDK
+ 
 on:
   repository_dispatch:
     types: [version_update]
-
+ 
 permissions:
   contents: write
   pull-requests: write
-
+ 
 jobs:
-  sync_version:
+  sync:
     runs-on: ubuntu-latest
-
+ 
     steps:
+      # --------------------------------------------
+      # Checkout repository
+      # --------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.PAT }}
           fetch-depth: 0
-
-
+ 
       # --------------------------------------------
       # Load & validate version (from primary repo)
       # --------------------------------------------
@@ -29,12 +31,12 @@ jobs:
           VERSION="${VERSION//,/\.}"
  
           if [ -z "$VERSION" ]; then
-            echo "❌ Version missing in dispatch payload"
+            echo "Version missing in dispatch payload"
             exit 1
           fi
  
           if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "❌ Invalid version format: $VERSION"
+            echo "Invalid version format: $VERSION"
             exit 1
           fi
  
@@ -62,57 +64,66 @@ jobs:
           fi
  
           echo "Version change detected. Proceeding."
-
-
-      - name: Read current version
+ 
+      # --------------------------------------------
+      # Prepare release branch
+      # --------------------------------------------
+      - name: Prepare release branch
         run: |
-          CURRENT=$(jq -r '.version' composer.json)
-          echo "CURRENT_VERSION=$CURRENT" >> $GITHUB_ENV
-          echo "Local version: $CURRENT"
-
-      - name: Increment patch version
-        run: |
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
-          PATCH=$((PATCH + 1))
-          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
-
-          echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
-          echo "New version: $NEW_VERSION"
-
-          jq ".version = \"$NEW_VERSION\"" composer.json > tmp.json
-          mv tmp.json composer.json
-
-      - name: Create release branch
-        run: |
-          git checkout master
-          git pull origin master
           BRANCH="release-v${VERSION}"
-          git checkout -b "$BRANCH"
           echo "BRANCH=$BRANCH" >> $GITHUB_ENV
-
+ 
+          git fetch origin
+ 
+          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+            git checkout "$BRANCH"
+            git pull origin "$BRANCH"
+          else
+            git checkout -b "$BRANCH"
+          fi
+ 
+      # --------------------------------------------
+      # Update composer.json version
+      # --------------------------------------------
       - name: Update composer.json
         run: |
           jq ".version = \"$VERSION\"" composer.json > tmp.json
           mv tmp.json composer.json
-
-      - name: Commit and push changes
+ 
+      # --------------------------------------------
+      # Commit & push
+      # --------------------------------------------
+      - name: Commit & push
         run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
+          git config user.name "froala-travis-bot"
+          git config user.email "froala_git_travis_bot@idera.com"
+ 
           git add composer.json
-          git commit -m "chore: sync version to v${VERSION}" || echo "Nothing to commit"
+          git commit -m "chore: release PHP SDK v${VERSION}" || echo "Nothing to commit"
           git push origin "$BRANCH"
-
-      - name: Authenticate GH CLI
-        run: echo "${{ secrets.PAT }}" | gh auth login --with-token
-
+ 
+      # --------------------------------------------
+      # Create Pull Request 
+      # --------------------------------------------
       - name: Create Pull Request
         env:
           GH_TOKEN: ${{ secrets.PAT }}
+          RELEASE_NOTES: ${{ github.event.client_payload.release_notes }}
         run: |
+          git fetch origin master
+ 
+          if git diff --quiet origin/master..."$BRANCH"; then
+            echo "No commits between $BRANCH and master. Skipping PR creation."
+            exit 0
+          fi
+ 
+          PR_BODY=$(printf \
+            "release: yes\n\n## Release Notes (from primary repo)\n\n%s\n" \
+            "$RELEASE_NOTES")
+ 
           gh pr create \
             --base master \
             --head "$BRANCH" \
             --title "Release v${VERSION}" \
-            --body "release: yes" \
-            || echo "Pull request may already exist"
+            --body "$PR_BODY" \
+            || echo "Pull request already exists"
