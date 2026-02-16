@@ -1,58 +1,129 @@
-name: Auto Release on Merge
+name: Sync Version – PHP SDK
+ 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, closed]
-    branches:
-      - master
+  repository_dispatch:
+    types: [version_update]
+ 
 permissions:
   contents: write
+  pull-requests: write
+ 
 jobs:
-  validate_pr:
-    # Run validation only when PR is NOT merged yet
-    if: github.event.pull_request.merged == false
+  sync:
     runs-on: ubuntu-latest
+ 
     steps:
-      - name: Check commit message for release flag
-        run: |
-          TITLE="${{ github.event.pull_request.title }}"
-          BODY="${{ github.event.pull_request.body }}"
-          if echo "$TITLE" | grep -iq "release: yes"; then
-            echo "Commit message valid."
-            exit 0
-          fi
-          if echo "$BODY" | grep -iq "release: yes"; then
-            echo "Commit message valid."
-            exit 0
-          fi
-          echo "ERROR: PR cannot be merged because it does not contain 'release: yes'"
-          exit 1
-
-  create_release:
-    # Run only when PR is merged AND has release flag
-    if: >
-      github.event.pull_request.merged == true &&
-      (
-        contains(github.event.pull_request.title, 'release: yes') ||
-        contains(github.event.pull_request.body, 'release: yes')
-      )
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repo
+      # --------------------------------------------
+      # Checkout repository
+      # --------------------------------------------
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: master
-      - name: Extract version from composer.json
-        id: version
+          token: ${{ secrets.PAT }}
+          fetch-depth: 0
+ 
+      # --------------------------------------------
+      # Load & validate version (from primary repo)
+      # --------------------------------------------
+      - name: Load & validate version
         run: |
-          VERSION=$(jq -r '.version' composer.json)
+          VERSION="${{ github.event.client_payload.version }}"
+          VERSION="${VERSION//,/\.}"
+ 
+          if [ -z "$VERSION" ]; then
+            echo "Version missing in dispatch payload"
+            exit 1
+          fi
+ 
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version format: $VERSION"
+            exit 1
+          fi
+ 
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "Detected version: $VERSION"
-      - name: Create Release
-        uses: actions/create-release@v1
+          echo "Dispatching version $VERSION"
+ 
+      # --------------------------------------------
+      # Compare current version vs incoming version
+      # --------------------------------------------
+      - name: Compare current version
+        run: |
+          CURRENT_VERSION=$(jq -r '.version' composer.json)
+ 
+          if [ -z "$CURRENT_VERSION" ] || [ "$CURRENT_VERSION" = "null" ]; then
+            echo "Unable to determine current version from composer.json"
+            exit 1
+          fi
+ 
+          echo "Current version : $CURRENT_VERSION"
+          echo "Incoming version: $VERSION"
+ 
+          if [ "$CURRENT_VERSION" = "$VERSION" ]; then
+            echo "Versions are identical. Denying PR creation."
+            exit 0
+          fi
+ 
+          echo "Version change detected. Proceeding."
+ 
+      # --------------------------------------------
+      # Prepare release branch
+      # --------------------------------------------
+      - name: Prepare release branch
+        run: |
+          BRANCH="release-v${VERSION}"
+          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
+ 
+          git fetch origin
+ 
+          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+            git checkout "$BRANCH"
+            git pull origin "$BRANCH"
+          else
+            git checkout -b "$BRANCH"
+          fi
+ 
+      # --------------------------------------------
+      # Update composer.json version
+      # --------------------------------------------
+      - name: Update composer.json
+        run: |
+          jq ".version = \"$VERSION\"" composer.json > tmp.json
+          mv tmp.json composer.json
+ 
+      # --------------------------------------------
+      # Commit & push
+      # --------------------------------------------
+      - name: Commit & push
+        run: |
+          git config user.name "froala-travis-bot"
+          git config user.email "froala_git_travis_bot@idera.com"
+ 
+          git add composer.json
+          git commit -m "chore: release PHP SDK v${VERSION}" || echo "Nothing to commit"
+          git push origin "$BRANCH"
+ 
+      # --------------------------------------------
+      # Create Pull Request 
+      # --------------------------------------------
+      - name: Create Pull Request
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: "v${{ env.VERSION }}"
-          release_name: "Release v${{ env.VERSION }}"
-          body: |
-            Auto-release generated for version v${{ env.VERSION }}
+          GH_TOKEN: ${{ secrets.PAT }}
+          RELEASE_NOTES: ${{ github.event.client_payload.release_notes }}
+        run: |
+          git fetch origin master
+ 
+          if git diff --quiet origin/master..."$BRANCH"; then
+            echo "No commits between $BRANCH and master. Skipping PR creation."
+            exit 0
+          fi
+ 
+          PR_BODY=$(printf \
+            "release: yes\n\n## Release Notes (from primary repo)\n\n%s\n" \
+            "$RELEASE_NOTES")
+ 
+          gh pr create \
+            --base master \
+            --head "$BRANCH" \
+            --title "Release v${VERSION}" \
+            --body "$PR_BODY" \
+            || echo "Pull request already exists"
